@@ -137,8 +137,9 @@ def kill():
     # Check victim is killer's target
     if killer.victim.id != victim.id:
         # TODO
+        print("LAKSJKDAS")
 
-        # Perform kill
+    # Perform kill
     game.perform_kill(killer, victim)
 
     # Return success
