@@ -19,8 +19,8 @@ app.config["DEBUG"] = True
 # =======================================
 # ============= ZODB SETUP ==============
 # =======================================
-# storage = ZODB.FileStorage.FileStorage('assasins.fs')
-db_instance = ZODB.DB(None)  # ZODB.DB(storage)
+# storage = ZODB.FileStorage.FileStorage('assasins_db.fs')
+db_instance = ZODB.DB(None)
 conn = db_instance.open()
 db = conn.root
 db.users = BTrees.OOBTree.BTree()
@@ -32,7 +32,7 @@ db.games = BTrees.OOBTree.BTree()
 # =======================================
 @app.route('/', methods=['GET'])
 def home():
-    return "{\"healthy\":\"true\"}"
+    return "{\"healthy\":true}"
 
 
 # =======================================
@@ -47,7 +47,7 @@ def register():
         name = request.json['name']
         fav_loc = request.json['favourite_location']
     except:
-        abort(Response("Malformed request"), 400)
+        abort(Response("Malformed request", 400))
 
     # Check ID is unused
     if user_id in db.users:
@@ -57,7 +57,7 @@ def register():
     db.users[user_id] = User(user_id, name, bio, fav_loc)
 
     # Return success
-    return "{\"success\":\"true\"}"
+    return "{\"success\":true}"
 
 
 # =======================================
@@ -77,6 +77,29 @@ def user(user_id):
         "bio": user.bio,
         "favourite_location": user.favourite_location,
         "game_id": None,
+    })
+
+
+# =======================================
+# ============== LOGIN USER =============
+# =======================================
+@app.route('/login', methods=['POST'])
+def login(user_id):
+    # Parse & validate fields
+    try:
+        user_id = request.json['id']
+    except:
+        abort(Response("Malformed request", 400))
+
+    # Get user
+    if not user_id in db.users:
+        abort(Response("No user with provided ID exists", 400))
+    user = db.users[user_id]
+
+    # Convert to JSON & return
+    return json.dumps({
+        "id": user.user_id,
+        "game_id": user.game_id,
     })
 
 
@@ -115,6 +138,9 @@ def kill():
         abort(Response("No game with provided ID exists", 400))
     game = db.games[game_id]
 
+    if game.started == False:
+        abort(Response("Game has not started", 400))
+
     # Get killer if in game
     if not killer_id in game.player_ids:
         abort(Response("No killer with provided ID exists in game", 400))
@@ -135,15 +161,14 @@ def kill():
         abort(Response("No killer in game with provided ID", 400))
 
     # Check victim is killer's target
-    if killer.victim.id != victim.id:
-        # TODO
-        print("LAKSJKDAS")
+    if game.targets_map[killer.user_id] != victim.user_id:
+        abort(Response("Killer's target is not this victim"))
 
     # Perform kill
     game.perform_kill(killer, victim)
 
     # Return success
-    return "{\"success\":\"true\"}"
+    return "{\"success\":true}"
 
 
 # =======================================
@@ -156,12 +181,16 @@ def join():
         game_id = request.json['game_id']
         player_id = request.json['player_id']
     except:
-        abort(Response("Malformed request"), 400)
+        abort(Response("Malformed request", 400))
 
     # Get game
     if game_id not in db.games:
         abort(Response("No game with provided ID exists", 400))
     game = db.games[game_id]
+
+    # Check game hasn't started
+    if game.started:
+        abort(Response("Game has already started", 400))
 
     # Get user
     if player_id not in db.users:
@@ -169,7 +198,7 @@ def join():
     player = db.users[player_id]
 
     # Check if user is already in the game
-    if player.game_id != None:
+    if player.game_id is not None:
         abort(Response("Player with provided ID already in game", 400))
 
     # Check game is not at max capacity
@@ -181,7 +210,7 @@ def join():
     player.game_id = game_id
 
     # Return success
-    return "{\"success\":\"true\"}"
+    return "{\"success\":true}"
 
 
 # =======================================
@@ -196,7 +225,7 @@ def game_setup():
         end_date = request.json['end_date']
         location = request.json['location']
     except:
-        abort(Response("Malformed request"), 400)
+        abort(Response("Malformed request", 400))
 
     # Create game object
     game = Game(name, end_date, location, max_players)
@@ -213,6 +242,37 @@ def game_setup():
 
 
 # =======================================
+# ============= START GAME ==============
+# =======================================
+@app.route('/start', methods=['POST'])
+def start_game():
+    # Parse & validate fields
+    try:
+        game_id = request.json['game_id']
+    except:
+        abort(Response("Malformed request", 400))
+
+    # Get game
+    if not game_id in db.games:
+        abort(Response("No game with provided ID exists", 400))
+    game = db.games[game_id]
+
+    # Check game hasn't already started
+    if game.started == True:
+        abort(Response("Game has already started", 400))
+
+    # Check game has enough players
+    if len(game.player_ids) < 2:
+        abort(Response("Not enough players in game", 400))
+
+    # Start game
+    game.start_game()
+
+    # Return success
+    return "{\"success\":true}"
+
+
+# =======================================
 # ========== LOOKUP GAME (ANON) =========
 # =======================================
 @ app.route('/game/<game_id>', methods=['GET'])
@@ -225,11 +285,16 @@ def game_info_anon(game_id):
     # Convert game to JSON & return
     return json.dumps({
         "id": game.game_id,
+        "name": game.name,
         "player_ids": game.player_ids,
         "target_ids":  game.targets_map,
         "location": game.location,
         "max_players": game.max_players,
         "end_date": game.end_date,
+        "started": game.started,
+        "dead": game.dead_player_ids,
+        "ended": game.ended,
+        "winner": game.winner_id,
     })
 
 
@@ -243,14 +308,28 @@ def game_info(game_id, user_id):
         abort(Response("No game with provided ID exists", 400))
     game = db.games[game_id]
 
+    # Get user
+    if user_id not in game.player_ids:
+        abort(Response("Player with provided ID not in game", 400))
+
+    if user_id not in db.users:
+        abort(Response("Player with provided ID does not exist", 400))
+
+    user = db.users[user_id]
+
     # Convert game to JSON & return
     return json.dumps({
         "id": game.game_id,
+        "name": game.name,
+        "dead": user_id in game.dead_player_ids,
         "player_ids": game.player_ids,
         "target_ids":  game.targets_map[user_id],
         "location": game.location,
         "max_players": game.max_players,
         "end_date": game.end_date,
+        "game_started": game.started,
+        "ended": game.ended,
+        "winner": game.winner_id,
     })
 
 
